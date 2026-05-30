@@ -42,6 +42,7 @@ runs:
         TARGET_REPO: "${{ github.repository }}"
       run: |
         # Archive, Split, and Upload Cache
+        set -euo pipefail
         if [ "${{ inputs.debug }}" = "true" ]; then set -x; fi
         
         if [ "${{ inputs.working_dir }}" != "" ]; then 
@@ -58,22 +59,64 @@ runs:
         else
           FILENAME="$BASE_FILENAME.tzst"
         fi
+
+        ensure_release() {
+          local tag_name=$1
+          git fetch --tags --force
+          if ! git rev-parse "$tag_name" >/dev/null 2>&1; then
+            echo "Tag '$tag_name' not found. Creating backdated release..."
+            GIT_COMMITTER_DATE="2015-01-01T12:00:00" git tag -a "$tag_name" -m "General Cache Storage"
+            git push origin "$tag_name" --force || echo "Push failed, tag may exist from a parallel job."
+            gh release create "$tag_name" --title "General Cache" --notes "Automated storage for build assets" --repo "$TARGET_REPO" || true
+          fi
+          local attempts=0
+          until gh release view "$tag_name" --repo "$TARGET_REPO" >/dev/null 2>&1; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 10 ]; then
+              echo "::error::Release '$tag_name' is not visible after creation."
+              return 1
+            fi
+            sleep 3
+          done
+          gh release edit "$tag_name" --latest=false --repo "$TARGET_REPO" >/dev/null 2>&1 || true
+        }
+
+        upload_with_retry() {
+          local file=$1
+          local max_attempts=5
+          local timeout_duration="45m"
+          local quiet_upload=true
+          [ "${{ inputs.debug }}" = "true" ] && quiet_upload=false
+
+          for ((i=1; i<=max_attempts; i++)); do
+            echo "  Attempt $i/$max_attempts for $(basename "$file") ($(du -h "$file" | cut -f1))..."
+            set +e
+            if [ "$quiet_upload" = "true" ] && [ "$i" -lt "$max_attempts" ]; then
+              timeout "$timeout_duration" gh release upload "$TAG_NAME" "$file" --clobber --repo "$TARGET_REPO" >/dev/null 2>&1
+            else
+              timeout "$timeout_duration" gh release upload "$TAG_NAME" "$file" --clobber --repo "$TARGET_REPO"
+            fi
+            local exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 0 ]; then
+              echo "  Successfully uploaded $(basename "$file")"
+              return 0
+            fi
+            if [ "$exit_code" -eq 124 ]; then
+              echo "  Attempt $i timed out after $timeout_duration."
+            else
+              echo "  Attempt $i failed (exit $exit_code)."
+            fi
+            if [ "$i" -lt "$max_attempts" ]; then
+              sleep $((5 * i))
+            fi
+          done
+          return 1
+        }
         
         echo "::group:: Checking Release State"
-        
-        git fetch --tags --force
-        
-        if ! git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-          echo "Tag '$TAG_NAME' not found. Creating backdated release..."
-          GIT_COMMITTER_DATE="2015-01-01T12:00:00" git tag -a "$TAG_NAME" -m "General Cache Storage"
-          if git push origin "$TAG_NAME" --force; then
-            gh release create "$TAG_NAME" --title "General Cache" --notes "Automated storage for build assets" --repo "$TARGET_REPO" || true
-          else
-            echo "Push failed, tag might have been created by a parallel job. Continuing..."
-          fi
-        else
-          echo "Release '$TAG_NAME' already exists. Ready for upload."
-        fi
+        ensure_release "$TAG_NAME"
+        echo "Release '$TAG_NAME' is ready for upload."
         echo "::endgroup::"
         
         echo "::group:: Archiving Path"
@@ -105,46 +148,32 @@ runs:
           echo "::endgroup::"
           
           echo "::group:: Uploading Assets"
-          MAX_SIZE=2000000000 # ~1.86GB
-          
-          upload_with_retry() {
-            local file=$1
-            local max_attempts=3
-            for ((i=1; i<=max_attempts; i++)); do
-              echo "  Attempt $i for $file..."
-              
-              if [ "${{ inputs.debug }}" = "true" ]; then
-                if timeout 10m gh release upload "$TAG_NAME" "$file" --clobber --repo "$TARGET_REPO"; then
-                  echo "  Successfully uploaded $file"
-                  return 0
-                fi
-              else
-                if timeout 10m gh release upload "$TAG_NAME" "$file" --clobber --repo "$TARGET_REPO" > /dev/null 2>&1; then
-                  echo "  Successfully uploaded $file"
-                  return 0
-                fi
-              fi
-              
-              echo "  ⚠ Attempt $i failed or timed out. Retrying..."
-              sleep 5
-            done
-            return 1
-          }
-          
-          if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
-            echo "⚠ File > 2GB. Splitting..."
-            split -b 1500M -a 2 "$FILENAME" "${FILENAME}.part"
+          # GitHub release assets are limited to 2GB; split earlier so uploads finish within timeout.
+          SPLIT_THRESHOLD=800000000   # 800MB
+          GITHUB_MAX_SIZE=2000000000  # ~1.86GB hard limit
+          SPLIT_CHUNK=750M
+
+          echo "Removing previous assets for ${BASE_FILENAME}* (if any)..."
+          mapfile -t OLD_ASSETS < <(gh release view "$TAG_NAME" --repo "$TARGET_REPO" --json assets --jq -r ".assets[].name | select(startswith(\"${BASE_FILENAME}\"))" 2>/dev/null || true)
+          for asset in "${OLD_ASSETS[@]}"; do
+            [ -z "$asset" ] && continue
+            gh release delete-asset "$TAG_NAME" "$asset" --repo "$TARGET_REPO" -y >/dev/null 2>&1 || true
+          done
+
+          if [ "$FILE_SIZE" -gt "$SPLIT_THRESHOLD" ] || [ "$FILE_SIZE" -gt "$GITHUB_MAX_SIZE" ]; then
+            echo "Archive is $((FILE_SIZE / 1024 / 1024))MB — splitting into ${SPLIT_CHUNK} chunks for reliable upload..."
+            split -b "$SPLIT_CHUNK" -a 2 "$FILENAME" "${FILENAME}.part"
             for part in "${FILENAME}".part*; do
-              echo "Uploading $part..."
+              echo "Uploading $(basename "$part")..."
               if ! upload_with_retry "$part"; then
                 echo "::error::Failed to upload part $part after multiple attempts."
                 exit 1
               fi
               rm -f "$part"
             done
-            rm -rf "$FILENAME"
+            rm -f "$FILENAME"
           else
-            echo "Uploading $FILENAME..."
+            echo "Archive is $((FILE_SIZE / 1024 / 1024))MB — uploading as a single file..."
             if ! upload_with_retry "$FILENAME"; then
               echo "::error::Failed to upload $FILENAME after multiple attempts."
               exit 1
