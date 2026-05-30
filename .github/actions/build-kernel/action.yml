@@ -68,9 +68,9 @@ runs:
         BUILD_CONFIG=common/build.config.gki.aarch64 \
         build/build.sh -j"$(nproc)" \
         CC="/usr/bin/ccache clang" \
-        CXX="/usr/bin/ccache clang+" \
+        CXX="/usr/bin/ccache clang++" \
         HOSTCC="/usr/bin/ccache clang" \
-        HOSTCXX="/usr/bin/ccache clang+" \
+        HOSTCXX="/usr/bin/ccache clang++" \
         LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
         HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
       else
@@ -141,4 +141,3 @@ runs:
       set -euo pipefail
       cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
       patch -p1 < bypass.patch
-
