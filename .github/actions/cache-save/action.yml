@@ -72,11 +72,12 @@ runs:
           local attempts=0
           until gh release view "$tag_name" --repo "$TARGET_REPO" >/dev/null 2>&1; do
             attempts=$((attempts + 1))
-            if [ "$attempts" -ge 10 ]; then
-              echo "::error::Release '$tag_name' is not visible after creation."
-              return 1
+            if [ "$attempts" -ge 20 ]; then
+              echo "::warning::Release '$tag_name' is not visible after creation. Skipping cache upload."
+              return 0
             fi
-            sleep 3
+            echo "  Waiting for release to propagate (attempt $attempts/20)..."
+            sleep 5
           done
           gh release edit "$tag_name" --latest=false --repo "$TARGET_REPO" >/dev/null 2>&1 || true
         }
@@ -117,7 +118,13 @@ runs:
         }
         
         echo "::group:: Checking Release State"
-        ensure_release "$TAG_NAME"
+        RELEASE_READY=true
+        ensure_release "$TAG_NAME" || RELEASE_READY=false
+        if [ "$RELEASE_READY" = "false" ]; then
+          echo "⚠️ Skipping cache upload - release not available."
+          echo "::endgroup::"
+          exit 0
+        fi
         echo "Release '$TAG_NAME' is ready for upload."
         echo "::endgroup::"
         
