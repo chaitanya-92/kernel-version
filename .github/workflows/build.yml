@@ -35,7 +35,7 @@ jobs:
   build-gki:
     name: "${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} (${{ inputs.variant }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - name: Checkout Repository
@@ -265,14 +265,13 @@ jobs:
 
     - name: Check cache hit
       run: |
-        echo "Cache restore status:"        CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
+        echo "Cache restore status:"
+        CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
         LTO_CCACHE_HIT="${{ steps.restore-lto-ccache.outputs.cache-hit || 'skipped' }}"
         BAZEL_HIT="${{ steps.restore-bazel.outputs.cache-hit || 'skipped' }}"
-        LTO_BAZEL_HIT="${{ steps.restore-lto-bazel.outputs.cache-hit || 'skipped' }}"
         echo "  ccache: $CCACHE_HIT"
         echo "  lto (ccache versions): $LTO_CCACHE_HIT"
         echo "  bazel: $BAZEL_HIT"
-        echo "  lto (bazel versions): $LTO_BAZEL_HIT"
 
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
@@ -296,6 +295,7 @@ jobs:
     - name: Save ccache
       uses: ./.github/actions/cache-save
       if: inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' || inputs.version == 'android13-5.15'
+      continue-on-error: true
       with:
         cache_path: /home/runner/.ccache
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
@@ -306,6 +306,7 @@ jobs:
     - name: Save lto-cache
       uses: ./.github/actions/cache-save
       if: inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' || inputs.version == 'android13-5.15'
+      continue-on-error: true
       with:
         cache_path: /home/runner/.ld_cache
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
@@ -316,14 +317,16 @@ jobs:
     - name: Save bazel-cache
       uses: ./.github/actions/cache-save
       if:  inputs.version == 'android14-5.15' || inputs.version == 'android14-6.1' || inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12'
+      continue-on-error: true
       with:
         cache_path: /home/runner/.cache/bazel
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
         cache_bucket: "bazel-cache"
-        compression_level: 9
+        compression_level: 3
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
     - name: Build Bypass Kernel
+      if: inputs.version != 'android15-6.6'
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
@@ -331,6 +334,10 @@ jobs:
       with:
         bypass: true
         version: ${{ inputs.version }}
+
+    - name: Clean Bypass-Image if not built
+      if: inputs.version == 'android15-6.6'
+      run: rm -f ${{ github.workspace }}/AnyKernel3/Bypass-Image
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
