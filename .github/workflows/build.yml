@@ -326,6 +326,7 @@ jobs:
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
     - name: Build Bypass Kernel
+      if: inputs.version != 'android15-6.6'
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
@@ -333,6 +334,10 @@ jobs:
       with:
         bypass: true
         version: ${{ inputs.version }}
+
+    - name: Clean Bypass-Image if not built
+      if: inputs.version == 'android15-6.6'
+      run: rm -f ${{ github.workspace }}/AnyKernel3/Bypass-Image
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
